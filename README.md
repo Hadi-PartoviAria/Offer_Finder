@@ -1,2 +1,2 @@
 # Offer_Finder
-Finds discounted offers
+Finds discounted offers from Amazon and Best Buy
