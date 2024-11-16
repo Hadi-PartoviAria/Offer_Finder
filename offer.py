@@ -18,9 +18,18 @@ def setup_driver():
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36')
+    # Add more realistic browser behavior
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Mask webdriver presence
+    driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'})
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     return driver
 
 def search_amazon(query, driver):
@@ -60,13 +69,14 @@ def search_amazon(query, driver):
                     
                     link = link_element.get_attribute("href")
                     
-                    products.append({
-                        "title": title,
-                        "price": current_price,
-                        "original_price": original_price,
-                        "discount": discount,
-                        "link": link
-                    })
+                    if discount > 0:
+                        products.append({
+                            "title": title,
+                            "price": current_price,
+                            "original_price": original_price,
+                            "discount": discount,
+                            "link": link
+                        })
             except Exception as e:
                 print(f"Error processing Amazon item: {str(e)}")
                 continue
@@ -79,42 +89,106 @@ def search_amazon(query, driver):
 
 def search_walmart(query, driver):
     try:
-        url = f"https://www.walmart.com/search?q={query}"
+        url = f"https://www.walmart.com/search?q={query.replace(' ', '+')}"
         driver.get(url)
-        time.sleep(random.uniform(3, 5))  # Increased delay for Walmart
+        time.sleep(random.uniform(4, 6))
 
-        # Wait for product grid to load
+        # Wait for page to load completely
         WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='list-view']"))
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div[data-testid='search-results-layout']"))
         )
 
+        # Simulate human-like scrolling
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        for _ in range(3):
+            for i in range(10):
+                driver.execute_script(f"window.scrollTo(0, {(i+1) * last_height/10});")
+                time.sleep(random.uniform(0.1, 0.3))
+            time.sleep(random.uniform(1, 2))
+
         products = []
-        items = driver.find_elements(By.CSS_SELECTOR, "[data-testid='list-view'] > div")
+        # Updated product container selectors
+        items = driver.find_elements(By.CSS_SELECTOR, 
+            "div[data-testid='list-view'] > div, div[data-item-id], section[data-testid='search-results'] div[data-testid='list-view'] > div"
+        )
+
+        print(f"Debug: Found {len(items)} potential Walmart items")
         
         for item in items:
             try:
-                # Updated selectors for Walmart
-                title_element = WebDriverWait(item, 5).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "[data-automation-id='product-title']"))
-                )
-                price_element = item.find_element(By.CSS_SELECTOR, "[data-automation-id='product-price']")
-                
-                title = title_element.text
-                current_price = float(price_text.replace('$', '').replace(',', '').strip())
+                # Find title - updated selectors
+                title = None
+                for selector in [
+                    "span[data-automation-id='product-title']",
+                    "a[data-automation-id='product-title']",
+                    "*[data-automation-id='product-title']",
+                    "a span.w_V"
+                ]:
+                    try:
+                        title_elem = item.find_element(By.CSS_SELECTOR, selector)
+                        title = title_elem.text.strip()
+                        if title:
+                            break
+                    except: continue
+
+                if not title:
+                    continue
+
+                # Find current price - updated selectors
+                current_price = None
+                for selector in [
+                    "div[data-automation-id='product-price'] span.w_V",
+                    "span[data-automation-id='retail-price']",
+                    "div[data-automation-id='product-price'] span:first-child",
+                    "span.w_V:not(.w_X)"
+                ]:
+                    try:
+                        price_elem = item.find_element(By.CSS_SELECTOR, selector)
+                        price_text = price_elem.text.strip()
+                        if '$' in price_text:
+                            current_price = float(price_text.replace('$', '').replace(',', '').replace('Now', '').strip())
+                            break
+                    except: continue
+
+                if not current_price:
+                    continue
+
+                # Find original price - updated selectors
                 original_price = current_price
                 discount = 0.0
-                
-                # Try to find original price
-                try:
-                    original_price_element = item.find_element(By.CSS_SELECTOR, "[data-automation-id='strikethrough-price']")
-                    if original_price_element:
-                        original_price = float(original_price_element.text.replace('$', '').replace(',', '').strip())
-                        discount = ((original_price - current_price) / original_price) * 100
-                except: pass
-                
-                link = title_element.get_attribute("href")
-                
+                for selector in [
+                    "div[data-automation-id='product-price'] .w_X",
+                    "div[data-automation-id='product-price'] span.w_X",
+                    "span.w_X",
+                    "*[data-automation-id='strikethrough-price']"
+                ]:
+                    try:
+                        was_elem = item.find_element(By.CSS_SELECTOR, selector)
+                        was_text = was_elem.text.strip()
+                        if '$' in was_text:
+                            original_price = float(was_text.replace('$', '').replace(',', '').strip())
+                            if original_price > current_price:
+                                discount = ((original_price - current_price) / original_price) * 100
+                                break
+                    except: continue
+
+                # Find link - updated selectors
+                link = None
+                for selector in [
+                    "a[data-automation-id='product-title']",
+                    "a[link-identifier='linkTest']",
+                    "a.absolute.w-100",
+                    "a[data-testid='product-title']"
+                ]:
+                    try:
+                        link_elem = item.find_element(By.CSS_SELECTOR, selector)
+                        link = link_elem.get_attribute("href")
+                        if link and 'walmart.com' in link:
+                            break
+                    except: continue
+
                 if title and current_price and link:
+                    print(f"Debug: Found product - {title[:50]}... Price: ${current_price}")
                     products.append({
                         "title": title,
                         "price": current_price,
@@ -122,14 +196,15 @@ def search_walmart(query, driver):
                         "discount": discount,
                         "link": link
                     })
+
             except Exception as e:
-                print(f"Error processing Walmart item: {str(e)}")
+                print(f"Debug: Error processing item - {str(e)}")
                 continue
 
         return sorted(products, key=lambda x: x["discount"], reverse=True)
 
     except Exception as e:
-        print(f"Error searching Walmart: {str(e)}")
+        print(f"Debug: Major error in Walmart search - {str(e)}")
         return []
 
 def save_to_csv(amazon_results, walmart_results, query):
