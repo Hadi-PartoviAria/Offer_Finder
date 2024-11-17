@@ -54,40 +54,62 @@ def search_amazon(query, driver):
         try:
             all_products = []
             
-            # Search new products with deals first
-            print("\nSearching new products with deals...")
-            new_product_urls = [
-                f"https://www.amazon.com/s?k={query}&rh=n%3A172282%2Cp_n_condition-type%3A2224371011", # New items
-                f"https://www.amazon.com/s?k={query}&deals-widget=%257B%2522version%2522%253A1%257D", # Deals
+            # Define all search URLs including departments and deals
+            base_urls = [
+                # Main search pages
+                f"https://www.amazon.com/s?k={query}&i=all-departments",
+                f"https://www.amazon.com/s?k={query}&deals-widget=%257B%2522version%2522%253A1%257D",  # Today's Deals
+                
+                # Department-specific searches
+                f"https://www.amazon.com/s?k={query}&i=electronics",
+                f"https://www.amazon.com/s?k={query}&i=computers",
+                f"https://www.amazon.com/s?k={query}&i=fashion",
+                f"https://www.amazon.com/s?k={query}&i=fashion-mens",
+                f"https://www.amazon.com/s?k={query}&i=fashion-womens",
+                f"https://www.amazon.com/s?k={query}&i=sporting",
+                f"https://www.amazon.com/s?k={query}&i=home-garden",
+                f"https://www.amazon.com/s?k={query}&i=kitchen",
+                f"https://www.amazon.com/s?k={query}&i=tools",
+                f"https://www.amazon.com/s?k={query}&i=toys-and-games",
+                f"https://www.amazon.com/s?k={query}&i=beauty",
+                f"https://www.amazon.com/s?k={query}&i=automotive",
             ]
             
-            for url in new_product_urls:
+            # Search each URL and its second page
+            for url in base_urls:
+                print(f"\nSearching Amazon: {url}")
                 driver.delete_all_cookies()
                 driver.get(url)
-                time.sleep(random.uniform(3, 5))
+                time.sleep(random.uniform(2, 3))
                 
                 if driver.current_url.startswith("https://www.amazon.com"):
                     try:
-                        # Wait for results
-                        WebDriverWait(driver, 10).until(lambda d: any([
-                            d.find_elements(By.CSS_SELECTOR, selector) for selector in [
-                                ".s-main-slot",
-                                "#search",
-                                ".s-result-list",
-                                ".s-search-results"
-                            ]
-                        ]))
-                        
+                        # Get products from first page
                         products = get_amazon_products(driver)
                         if products:
                             all_products.extend(products)
                             
+                        # Try to get second page
+                        try:
+                            next_button = driver.find_element(By.CSS_SELECTOR, ".s-pagination-next:not(.s-pagination-disabled)")
+                            if next_button:
+                                next_url = next_button.get_attribute("href")
+                                if next_url:
+                                    print("Checking second page...")
+                                    driver.get(next_url)
+                                    time.sleep(random.uniform(2, 3))
+                                    more_products = get_amazon_products(driver)
+                                    if more_products:
+                                        all_products.extend(more_products)
+                        except: pass
+                            
                     except Exception as e:
-                        print(f"Error searching new products: {str(e)}")
+                        print(f"Error searching URL {url}: {str(e)}")
+                        continue
                 
-                time.sleep(random.uniform(2, 3))
+                time.sleep(random.uniform(1, 2))
             
-            # Then search other conditions
+            # Then search other conditions (used, renewed, etc.)
             other_conditions = [
                 ("used", "&rh=n%3A172282%2Cp_n_condition-type%3A6461716011"),
                 ("renewed", "&rh=n%3A172282%2Cp_n_condition-type%3A3242851011"),
@@ -132,18 +154,16 @@ def search_amazon(query, driver):
                 time.sleep(random.uniform(2, 3))
             
             if all_products:
-                # Remove duplicates prioritizing new items with discounts
+                # Remove duplicates keeping the best deals
                 seen = {}
                 for product in all_products:
                     key = (product['title'], product['price'])
                     existing = seen.get(key)
-                    if not existing or (
-                        product.get('condition') == 'New' and product['discount'] > existing['discount']
-                    ):
+                    if not existing or product['discount'] > existing['discount']:
                         seen[key] = product
                 
                 unique_products = list(seen.values())
-                # Sort by new discounted products first, then by discount amount
+                print(f"\nFound {len(unique_products)} total unique products across all departments")
                 return sorted(unique_products, 
                     key=lambda x: (
                         -int(x.get("condition", "New") == "New" and x["discount"] > 0),
