@@ -8,20 +8,46 @@ import pandas as pd
 from datetime import datetime
 import time
 import random
+from bs4 import BeautifulSoup
+from selenium.webdriver.chrome.options import Options
+from fake_useragent import UserAgent
+import undetected_chromedriver as uc
 
 def setup_driver():
-    options = webdriver.ChromeOptions()
-    # options.add_argument('--headless')  # Remove headless mode for testing
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36')
+    options = uc.ChromeOptions()
+    ua = UserAgent()
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument(f'--user-agent={ua.random}')
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_argument('--start-maximized')
-    options.add_argument('--disable-extensions')
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    return webdriver.Chrome(service=webdriver.chrome.service.Service(ChromeDriverManager().install()), 
-                          options=options)
+    
+    driver = uc.Chrome(options=options)
+    
+    # Add stealth JavaScript
+    stealth_js = """
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+        window.chrome = {
+            runtime: {}
+        };
+    """
+    driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+        'source': stealth_js
+    })
+    
+    return driver
+
+def get_user_discount():
+    while True:
+        try:
+            discount = float(input("Enter minimum discount percentage (0-100): "))
+            if 0 <= discount <= 100:
+                return discount
+            print("Please enter a value between 0 and 100")
+        except ValueError:
+            print("Please enter a valid number")
 
 def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
     products = []
@@ -29,11 +55,9 @@ def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
     
     while retry_count < max_retries:
         try:
-            # Use Amazon's search page instead of deals page
             url = f"https://www.amazon.com/s?k={keywords.replace(' ', '+')}&deals-widget=%257B%2522version%2522%253A1%252C%2522viewIndex%2522%253A0%252C%2522presetId%2522%253A%2522deals-collection-all-deals%2522%257D"
             print(f"Searching URL: {url}")
             
-            # Add random delay before each request
             time.sleep(random.uniform(2, 5))
             driver.get(url)
             
@@ -43,62 +67,164 @@ def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
                 driver.execute_script(f"window.scrollBy(0, {scroll_height});")
                 time.sleep(random.uniform(0.5, 1.5))
             
-            # Wait for page load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, 'div[data-component-type="s-search-result"]'))
-            )
-            
-            items = driver.find_elements(By.CSS_SELECTOR, 'div[data-component-type="s-search-result"]')
+            # Use BeautifulSoup to parse the page
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            items = soup.select('div[data-component-type="s-search-result"]')
             print(f"Found {len(items)} items")
             
             for item in items[:max_items]:
                 try:
-                    # Wait for each element
-                    WebDriverWait(driver, 5).until(
-                        EC.visibility_of(item)
-                    )
-                    title = item.find_element(By.CSS_SELECTOR, 'h2 span').text
-                    # Update price selectors to match Amazon's current structure
-                    price_whole = item.find_elements(By.CSS_SELECTOR, '.a-price:not(.a-text-price) .a-price-whole')
-                    price_fraction = item.find_elements(By.CSS_SELECTOR, '.a-price:not(.a-text-price) .a-price-fraction')
-                    original_price_element = item.find_elements(By.CSS_SELECTOR, '.a-text-price .a-offscreen')
+                    title_elem = item.select_one('h2 span.a-text-normal')
+                    if not title_elem:
+                        continue
+                    title = title_elem.text.strip()
                     
-                    if price_whole and original_price_element:
-                        current_price = float(f"{price_whole[0].text}.{price_fraction[0].text if price_fraction else '00'}")
-                        original_price_text = original_price_element[0].get_attribute('innerHTML')
-                        list_price = float(original_price_text.replace('$', '').replace(',', ''))
+                    # Get current price
+                    price_whole = item.select_one('.a-price:not(.a-text-price) .a-price-whole')
+                    price_fraction = item.select_one('.a-price:not(.a-text-price) .a-price-fraction')
+                    if not price_whole:
+                        continue
                         
-                        print(f"\nProduct: {title[:50]}...")
-                        print(f"Current Price: ${current_price}")
-                        print(f"Original Price: ${list_price}")
+                    # Fix double dots issue
+                    current_price_str = f"{price_whole.text}.{price_fraction.text if price_fraction else '00'}".replace('..', '.')
+                    current_price = float(current_price_str)
+                    
+                    # Get original price
+                    original_price_elem = item.select_one('.a-text-price .a-offscreen')
+                    if not original_price_elem:
+                        continue
                         
-                        if list_price > current_price:
-                            discount = round((list_price - current_price) / list_price * 100, 2)
-                            print(f"Discount: {discount}%")
+                    original_price_str = original_price_elem.text.replace('$', '').replace(',', '').replace('..', '.')
+                    original_price = float(original_price_str)
+                    
+                    print(f"\nProduct: {title[:50]}...")
+                    print(f"Current Price: ${current_price}")
+                    print(f"Original Price: ${original_price}")
+                    
+                    if original_price > current_price:
+                        discount = round((original_price - current_price) / original_price * 100, 2)
+                        print(f"Discount: {discount}%")
+                        
+                        # Get product URL
+                        url_elem = item.select_one('h2 a.a-link-normal')
+                        if url_elem:
+                            product_url = url_elem.get('href')
+                            if not product_url.startswith('http'):
+                                product_url = 'https://www.amazon.com' + product_url
                             
-                            products.append({
-                                'title': title,  # Remove discount from title
+                            product_info = {
+                                'title': title,
                                 'current_price': current_price,
-                                'original_price': list_price,
-                                'url': item.find_element(By.CSS_SELECTOR, 'h2 a').get_attribute('href'),
-                                'discount': discount
-                            })
+                                'original_price': original_price,
+                                'url': product_url,
+                                'discount': discount,
+                                'source': 'Amazon'
+                            }
+                            products.append(product_info)
+                            print(f"Added Amazon product with {discount}% discount")
+                            
                 except Exception as e:
-                    print(f"Error processing item: {e}")
+                    print(f"Error processing Amazon item: {str(e)}")
                     continue
-                    
-            break  # If successful, exit retry loop
+            
+            print(f"Found {len(products)} valid Amazon products")
+            return products
             
         except Exception as e:
             retry_count += 1
-            print(f"Attempt {retry_count} failed: {str(e)}")
+            print(f"Amazon attempt {retry_count} failed: {str(e)}")
             if retry_count < max_retries:
-                time.sleep(random.uniform(5, 10))  # Wait before retrying
+                time.sleep(random.uniform(5, 10))
             else:
                 print("Max retries reached, moving to next search term")
     return products
 
-def filter_discounted_products(products, min_discount=10):  # Changed default to match MIN_DISCOUNT_PERCENTAGE
+def search_bestbuy_products(driver, keywords, max_items=50, max_retries=3):
+    products = []
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            url = f"https://www.bestbuy.com/site/searchpage.jsp?st={keywords.replace(' ', '+')}&cp=1"
+            print(f"Searching Best Buy URL: {url}")
+            
+            driver.get(url)
+            time.sleep(random.uniform(5, 8))
+            
+            # Try to handle cookie consent and popups
+            try:
+                popup_buttons = driver.find_elements(By.CSS_SELECTOR, 'button[class*="close"], .modal-close')
+                for button in popup_buttons:
+                    if button.is_displayed():
+                        button.click()
+                        time.sleep(1)
+            except:
+                pass
+            
+            # Use BeautifulSoup for parsing
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            items = soup.select('div.list-item, div[class*="product-item"]')
+            
+            if not items:
+                print("No items found with primary selectors, trying alternative...")
+                items = soup.select('div[class*="product"]')
+            
+            print(f"Found {len(items)} items on Best Buy using BeautifulSoup")
+            
+            for item in items[:max_items]:
+                try:
+                    # Extract title
+                    title_elem = item.select_one('h4 a, .product-title a, a[class*="title"]')
+                    if not title_elem:
+                        continue
+                    title = title_elem.get_text(strip=True)
+                    
+                    # Extract current price
+                    price_elem = item.select_one('div[class*="price"] span[aria-hidden="true"], .current-price')
+                    if not price_elem:
+                        continue
+                    current_price = float(price_elem.get_text().replace('$', '').replace(',', '').strip())
+                    
+                    # Extract original price
+                    original_price_elem = item.select_one('.was-price, [class*="original-price"]')
+                    if original_price_elem:
+                        original_price = float(original_price_elem.get_text().replace('$', '').replace('Was ', '').replace(',', '').strip())
+                        
+                        if original_price > current_price:
+                            discount = round((original_price - current_price) / original_price * 100, 2)
+                            product_url = title_elem.get('href')
+                            if not product_url.startswith('http'):
+                                product_url = 'https://www.bestbuy.com' + product_url
+                            
+                            product_info = {
+                                'title': title,
+                                'current_price': current_price,
+                                'original_price': original_price,
+                                'url': product_url,
+                                'discount': discount,
+                                'source': 'Best Buy'
+                            }
+                            products.append(product_info)
+                            print(f"Added Best Buy product with {discount}% discount")
+                
+                except Exception as e:
+                    print(f"Error processing Best Buy item: {str(e)}")
+                    continue
+            
+            print(f"Found {len(products)} valid Best Buy products")
+            return products
+            
+        except Exception as e:
+            retry_count += 1
+            print(f"Best Buy attempt {retry_count} failed: {str(e)}")
+            if retry_count < max_retries:
+                time.sleep(random.uniform(10, 15))
+            else:
+                print("Max retries reached for Best Buy search")
+    
+    return products
+
+def filter_discounted_products(products, min_discount=50):  # Changed default to match MIN_DISCOUNT_PERCENTAGE
     filtered = [p for p in products if p['discount'] >= min_discount]
     print(f"Filtering products: {len(products)} total, {len(filtered)} with {min_discount}%+ discount")
     return filtered
@@ -112,7 +238,7 @@ def save_to_csv(products, filename="discounted_products.csv"):
     print(f"Saved {len(products)} discounted products to {filename}")
 
 if __name__ == "__main__":
-    MIN_DISCOUNT_PERCENTAGE = 10
+    MIN_DISCOUNT_PERCENTAGE = get_user_discount()
     search_categories = {
         'deals': ['clearance', 'discount', 'sale', 'deal'],
         'electronics': ['laptop deals', 'tablet sale', 'phone deals'],
@@ -131,15 +257,23 @@ if __name__ == "__main__":
             for keywords in terms:
                 print(f"Searching for: {keywords}")
                 time.sleep(random.uniform(3, 7))  # Add delay between searches
-                products = search_amazon_products(driver, f"{keywords}")
-                print(f"Found {len(products)} products before filtering")
-                discounted = filter_discounted_products(products, min_discount=MIN_DISCOUNT_PERCENTAGE)
-                print(f"Kept {len(discounted)} products after filtering for {MIN_DISCOUNT_PERCENTAGE}%+ discount")
-                all_products.extend(discounted)
+                
+                # Search both Amazon and Best Buy
+                amazon_products = search_amazon_products(driver, f"{keywords}")
+                bestbuy_products = search_bestbuy_products(driver, f"{keywords}")
+                
+                # Filter products meeting discount threshold
+                amazon_filtered = filter_discounted_products(amazon_products, min_discount=MIN_DISCOUNT_PERCENTAGE)
+                bestbuy_filtered = filter_discounted_products(bestbuy_products, min_discount=MIN_DISCOUNT_PERCENTAGE)
+                
+                all_products.extend(amazon_filtered)
+                all_products.extend(bestbuy_filtered)
+                
+                print(f"Category '{category}' - '{keywords}': Found {len(amazon_filtered)} Amazon and {len(bestbuy_filtered)} Best Buy products meeting {MIN_DISCOUNT_PERCENTAGE}% discount threshold")
         
         if all_products:
             unique_products = {p['url']: p for p in all_products}.values()
-            save_to_csv(list(unique_products), f"amazon_deals_{datetime.now().strftime('%Y%m%d')}.csv")
+            save_to_csv(list(unique_products), f"deals_{datetime.now().strftime('%Y%m%d')}.csv")
             print(f"\nTotal unique products found: {len(unique_products)}")
         else:
             print(f"No products with {MIN_DISCOUNT_PERCENTAGE}% or more discount found.")  # Modified to use variable
