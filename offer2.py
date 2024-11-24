@@ -49,6 +49,29 @@ def get_user_discount():
         except ValueError:
             print("Please enter a valid number")
 
+def detect_product_category(title):
+    """Detect product category based on keywords in title."""
+    title = title.lower()
+    categories = {
+        'laptop': ['laptop', 'notebook', 'chromebook'],
+        'tablet': ['tablet', 'ipad', 'galaxy tab'],
+        'phone': ['phone', 'iphone', 'smartphone', 'galaxy s', 'pixel'],
+        'headphone': ['headphone', 'earphone', 'earbud', 'airpod'],
+        'tv': ['tv', 'television', 'smart tv', 'oled', 'qled'],
+        'camera': ['camera', 'webcam', 'security cam'],
+        'gaming': ['gaming', 'xbox', 'playstation', 'nintendo', 'console'],
+        'computer': ['desktop', 'pc', 'computer', 'monitor'],
+        'wearable': ['watch', 'smartwatch', 'fitness tracker', 'band'],
+        'clothing': ['shirt', 'pants', 'jacket', 'dress', 'shoes', 'clothing'],
+        'home': ['furniture', 'chair', 'table', 'bed', 'sofa', 'mattress'],
+        'kitchen': ['kitchen', 'cookware', 'appliance', 'refrigerator', 'microwave']
+    }
+    
+    for category, keywords in categories.items():
+        if any(keyword in title for keyword in keywords):
+            return category
+    return 'other'
+
 def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
     products = []
     retry_count = 0
@@ -79,17 +102,7 @@ def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
                         continue
                     title = title_elem.text.strip()
                     
-                    # Get current price
-                    price_whole = item.select_one('.a-price:not(.a-text-price) .a-price-whole')
-                    price_fraction = item.select_one('.a-price:not(.a-text-price) .a-price-fraction')
-                    if not price_whole:
-                        continue
-                        
-                    # Fix double dots issue
-                    current_price_str = f"{price_whole.text}.{price_fraction.text if price_fraction else '00'}".replace('..', '.')
-                    current_price = float(current_price_str)
-                    
-                    # Get original price
+                    # Get original price first
                     original_price_elem = item.select_one('.a-text-price .a-offscreen')
                     if not original_price_elem:
                         continue
@@ -97,12 +110,20 @@ def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
                     original_price_str = original_price_elem.text.replace('$', '').replace(',', '').replace('..', '.')
                     original_price = float(original_price_str)
                     
-                    print(f"\nProduct: {title[:50]}...")
-                    print(f"Current Price: ${current_price}")
-                    print(f"Original Price: ${original_price}")
+                    # Get current price
+                    price_whole = item.select_one('.a-price:not(.a-text-price) .a-price-whole')
+                    price_fraction = item.select_one('.a-price:not(.a-text-price) .a-price-fraction')
+                    if not price_whole:
+                        continue
                     
-                    if original_price > current_price:
+                    current_price_str = f"{price_whole.text}.{price_fraction.text if price_fraction else '00'}".replace('..', '.')
+                    current_price = float(current_price_str)
+                    
+                    if current_price > 0 and original_price > current_price:  # Add validation
                         discount = round((original_price - current_price) / original_price * 100, 2)
+                        print(f"\nProduct: {title[:50]}...")
+                        print(f"Current Price: ${current_price}")
+                        print(f"Original Price: ${original_price}")
                         print(f"Discount: {discount}%")
                         
                         # Get product URL
@@ -118,7 +139,8 @@ def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
                                 'original_price': original_price,
                                 'url': product_url,
                                 'discount': discount,
-                                'source': 'Amazon'
+                                'source': 'Amazon',
+                                'category': detect_product_category(title)
                             }
                             products.append(product_info)
                             print(f"Added Amazon product with {discount}% discount")
@@ -127,17 +149,20 @@ def search_amazon_products(driver, keywords, max_items=50, max_retries=3):
                     print(f"Error processing Amazon item: {str(e)}")
                     continue
             
-            print(f"Found {len(products)} valid Amazon products")
-            return products
+            # Return collected products if any were found
+            if products:
+                print(f"Found {len(products)} valid Amazon products")
+                return products
+            
+            retry_count += 1
             
         except Exception as e:
             retry_count += 1
             print(f"Amazon attempt {retry_count} failed: {str(e)}")
             if retry_count < max_retries:
                 time.sleep(random.uniform(5, 10))
-            else:
-                print("Max retries reached, moving to next search term")
-    return products
+    
+    return products  # Return empty list if no products found
 
 def search_bestbuy_products(driver, keywords, max_items=50, max_retries=3):
     products = []
@@ -195,14 +220,15 @@ def search_bestbuy_products(driver, keywords, max_items=50, max_retries=3):
                             product_url = title_elem.get('href')
                             if not product_url.startswith('http'):
                                 product_url = 'https://www.bestbuy.com' + product_url
-                            
+                        
                             product_info = {
                                 'title': title,
                                 'current_price': current_price,
                                 'original_price': original_price,
                                 'url': product_url,
                                 'discount': discount,
-                                'source': 'Best Buy'
+                                'source': 'Best Buy',
+                                'category': detect_product_category(title)
                             }
                             products.append(product_info)
                             print(f"Added Best Buy product with {discount}% discount")
@@ -211,17 +237,15 @@ def search_bestbuy_products(driver, keywords, max_items=50, max_retries=3):
                     print(f"Error processing Best Buy item: {str(e)}")
                     continue
             
-            print(f"Found {len(products)} valid Best Buy products")
-            return products
+            break  # Break the retry loop if successful
             
         except Exception as e:
             retry_count += 1
             print(f"Best Buy attempt {retry_count} failed: {str(e)}")
             if retry_count < max_retries:
                 time.sleep(random.uniform(10, 15))
-            else:
-                print("Max retries reached for Best Buy search")
     
+    print(f"Found {len(products)} valid Best Buy products")
     return products
 
 def filter_discounted_products(products, min_discount=50):  # Changed default to match MIN_DISCOUNT_PERCENTAGE
@@ -232,10 +256,14 @@ def filter_discounted_products(products, min_discount=50):  # Changed default to
 def save_to_csv(products, filename="discounted_products.csv"):
     df = pd.DataFrame(products)
     # Reorder columns and rename for clarity
-    df = df[['title', 'current_price', 'original_price', 'discount', 'url']]  # Keep discount column
-    df.columns = ['Product', 'Current Price ($)', 'Original Price ($)', 'Discount (%)', 'URL']
+    df = df[['title', 'category', 'current_price', 'original_price', 'discount', 'url', 'source']]  # Add category
+    df.columns = ['Product', 'Category', 'Current Price ($)', 'Original Price ($)', 'Discount (%)', 'URL', 'Source']
+    
+    # Sort by discount percentage in descending order
+    df = df.sort_values(by='Discount (%)', ascending=False)
+    
     df.to_csv(filename, index=False)
-    print(f"Saved {len(products)} discounted products to {filename}")
+    print(f"Saved {len(products)} discounted products to {filename} (sorted by discount percentage)")
 
 if __name__ == "__main__":
     MIN_DISCOUNT_PERCENTAGE = get_user_discount()
